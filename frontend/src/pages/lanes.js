@@ -2,6 +2,7 @@ import {api, state} from '../state.js';
 import {badge, empty, header, input, readForm, stamp, text} from '../ui.js';
 
 const labels = {booked: '已预留', in_use: '使用中', released: '已释放', cancelled: '已取消'};
+const switchLabels = {pending: '换线中', confirmed: '已转完'};
 
 function eligibleSlots(task) {
   if (!task) return '';
@@ -25,8 +26,9 @@ function bookingForm(lanes, tasks) {
     ${input('每时段容量', 'capacity', 'number', 'required min="1" max="150"')}<button>保存等候线</button></form></details>`;
 }
 
-function bookingCard(booking, user) {
+function bookingCard(booking, user, lanes, pendingSwitch) {
   const owns = user.role === 'steward' && booking.handled_by === user.id;
+  const alternatives = lanes.filter(lane => lane.id !== booking.lane_id);
   return `<article class="lane-record" data-booking="${booking.id}"><div class="section-line"><div>
     <h3>${text(booking.lane_name)}</h3><p class="minor">${stamp(booking.slot_start)} · 疏导 #${booking.task_id} · ${text(booking.anchor)}</p></div>
     ${badge(labels[booking.status], booking.status === 'released' ? 'good' : 'warm')}</div>
@@ -34,21 +36,40 @@ function bookingCard(booking, user) {
       ${booking.moved_count != null ? `<strong>实际入线 ${booking.moved_count} 人</strong>` : ''}</div>
     ${owns && booking.status === 'booked' && booking.task_status === 'active' ? `<form class="stack" data-use="${booking.id}">
       ${input('实际入线人数', 'moved_count', 'number', `required min="1" max="${booking.seats}"`)}<button>登记入线</button></form>` : ''}
-    ${owns && booking.status === 'in_use' ? `<button data-end="${booking.id}" data-action="release">释放等候线</button>` : ''}
+    ${owns && booking.status === 'in_use' && !pendingSwitch ? `<button data-end="${booking.id}" data-action="release">释放等候线</button>` : ''}
+    ${owns && booking.status === 'in_use' && pendingSwitch ? '<p class="minor">换线确认中，转完前不能释放原预留。</p>' : ''}
+    ${user.role === 'operator' && booking.status === 'in_use' && !pendingSwitch && alternatives.length ?`<details class="line-config switch-form"><summary>临时封路 · 发起换线</summary><form class="stack" data-switch="${booking.id}">
+      <label>换到等候线<select name="to_lane_id">${alternatives.map(lane => `<option value="${lane.id}">${text(lane.name)} · ${lane.capacity} 人</option>`).join('')}</select></label>
+      <button>先留名额并发起换线</button></form></details>` : ''}
     ${user.role === 'operator' && booking.status === 'booked' ? `<button class="secondary" data-end="${booking.id}" data-action="cancel">取消预留</button>` : ''}</article>`;
+}
+
+function switchCard(row, user) {
+  const owns = user.role === 'steward' && row.handled_by === user.id;
+  return `<article class="lane-record" data-switch-id="${row.id}"><div class="section-line"><div>
+    <h3>${text(row.from_lane)} → ${text(row.to_lane)}</h3><p class="minor">${stamp(row.slot_start)} 时段 · 疏导 #${row.task_id} · ${text(row.anchor)}</p></div>
+    ${badge(switchLabels[row.status], row.status === 'confirmed' ? 'good' : 'warm')}</div>
+    <div class="allocation-readout"><strong>${row.seats} 人转线</strong>
+      <span>原线该时段余 ${row.from_capacity - row.from_load} / ${row.from_capacity} 人</span>
+      <span>新线该时段余 ${row.to_capacity - row.to_load} / ${row.to_capacity} 人</span></div>
+    ${row.status === 'pending' && owns ? `<button data-confirm-switch="${row.id}">确认全部转完</button>` : ''}
+    ${row.status === 'pending' && !owns ? '<p class="minor">等待现场确认全部转完，原线名额仍占用中。</p>' : ''}</article>`;
 }
 
 export async function lanes() {
   const query = `floor=${state.floor}`;
-  const [lanes, bookings, allTasks] = await Promise.all([api(`/lanes?${query}`), api(`/lane-bookings?${query}`), api(`/tasks?${query}`)]);
+  const [lanes, bookings, switches, allTasks] = await Promise.all([api(`/lanes?${query}`), api(`/lane-bookings?${query}`), api(`/lane-switches?${query}`), api(`/tasks?${query}`)]);
   const user = state.session.user;
   const blocked = new Set(bookings.filter(item => item.status !== 'cancelled').map(item => item.task_id));
   const tasks = allTasks.filter(task => task.status !== 'closed' && !blocked.has(task.id));
+  const switchByBooking = new Map(switches.filter(item => item.status === 'pending').map(item => [item.booking_id, item]));
   return {
-    html: `${header('现场容量', '等候线容量排班', '按 15 分钟预留临时等候线。同一时段共用容量，现场登记实入人数并释放后才能结案。')}
+    html: `${header('现场容量', '等候线容量排班', '按 15 分钟预留临时等候线。同一时段共用容量，现场登记实入人数并释放后才能结案；临时封路可发起换线，现场确认转完后原线名额才释放。')}
       <div class="split"><section class="panel"><div class="section-line"><h2>预留与实到台账</h2><a href="#tasks">返回客流疏导</a></div>
       ${lanes.length ? `<ul class="known-lines">${lanes.map(lane => `<li>${text(lane.name)} <b>${lane.capacity} 人 / 时段</b></li>`).join('')}</ul>` : ''}
-      ${bookings.length ? bookings.map(item => bookingCard(item, user)).join('') : empty('该楼层暂无等候线预留。')}</section>
+      ${bookings.length ? bookings.map(item => bookingCard(item, user, lanes, switchByBooking.get(item.id))).join('') : empty('该楼层暂无等候线预留。')}
+      <h2 class="under">换线记录</h2>
+      ${switches.length ? switches.map(item => switchCard(item, user)).join('') : empty('该楼层暂无换线记录。')}</section>
       ${user.role === 'operator' ? `<aside class="side-note">${bookingForm(lanes, tasks)}</aside>` : ''}</div>`,
     bind(root, action) {
       const start = root.querySelector('#book-line');
@@ -77,6 +98,12 @@ export async function lanes() {
       });
       root.querySelectorAll('[data-end]').forEach(button => {
         button.onclick = () => action(() => api(`/lane-bookings/${button.dataset.end}/end`, {action: button.dataset.action}), '预留已更新', button);
+      });
+      root.querySelectorAll('[data-switch]').forEach(form => {
+        form.onsubmit = event => { event.preventDefault(); action(() => api(`/lane-bookings/${form.dataset.switch}/switch`, readForm(form)), '换线已发起，等待现场确认转完', form); };
+      });
+      root.querySelectorAll('[data-confirm-switch]').forEach(button => {
+        button.onclick = () => action(() => api(`/lane-switches/${button.dataset.confirmSwitch}/confirm`, {}), '换线已确认，原线名额已释放', button);
       });
     },
   };

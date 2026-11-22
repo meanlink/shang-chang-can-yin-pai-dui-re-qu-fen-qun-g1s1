@@ -11,11 +11,23 @@ def list_lanes(cur, floor):
     return cur.fetchall()
 
 
+def slot_load(cur, lane_id, slot_start):
+    """该时段已占名额：有效预留加上进行中换线为本线留足的名额。"""
+    cur.execute("SELECT COALESCE(SUM(seats),0) AS used FROM lane_bookings WHERE lane_id=%s AND slot_start=%s "
+                "AND status IN ('booked','in_use')", (lane_id, slot_start))
+    used = int(cur.fetchone()['used'])
+    cur.execute("SELECT COALESCE(SUM(seats),0) AS held FROM lane_switches "
+                "WHERE to_lane_id=%s AND slot_start=%s AND status='pending'", (lane_id, slot_start))
+    return used + int(cur.fetchone()['held'])
+
+
 def list_bookings(cur, floor):
     cur.execute('SELECT b.id,b.task_id,b.lane_id,b.slot_start,b.seats,b.status,b.moved_count,b.guide_id, '
                 "l.name AS lane_name,l.capacity,t.status AS task_status,t.handled_by,s.name AS anchor, "
                 "SUM(CASE WHEN b.status IN ('booked','in_use') THEN b.seats ELSE 0 END) "
-                "OVER (PARTITION BY b.lane_id,b.slot_start) AS occupied "
+                "OVER (PARTITION BY b.lane_id,b.slot_start) + "
+                "(SELECT COALESCE(SUM(w.seats),0) FROM lane_switches w "
+                "WHERE w.status='pending' AND w.to_lane_id=b.lane_id AND w.slot_start=b.slot_start) AS occupied "
                 'FROM lane_bookings b JOIN queue_lanes l ON l.id=b.lane_id JOIN dispatch_tasks t ON t.id=b.task_id '
                 'JOIN hotspots h ON h.id=t.hotspot_id JOIN stores s ON s.id=h.anchor_store_id '
                 "WHERE l.floor=%s ORDER BY (b.status IN ('booked','in_use')) DESC,b.slot_start DESC,b.id DESC", (floor,))
@@ -59,9 +71,7 @@ def book(cur, data, actor):
     cur.execute('SELECT id FROM lane_bookings WHERE blocking_task_id=%s', (data.task_id,))
     if cur.fetchone():
         raise HTTPException(409, '该任务已有有效等候线预留')
-    cur.execute("SELECT COALESCE(SUM(seats),0) AS used FROM lane_bookings WHERE lane_id=%s AND slot_start=%s "
-                "AND status IN ('booked','in_use')", (data.lane_id, data.slot_start))
-    remaining = lane['capacity'] - int(cur.fetchone()['used'])
+    remaining = lane['capacity'] - slot_load(cur, data.lane_id, data.slot_start)
     if data.seats > remaining:
         raise HTTPException(409, f'该时段仅余 {remaining} 个名额')
     cur.execute('INSERT INTO lane_bookings(task_id,lane_id,slot_start,seats,booked_by) VALUES(%s,%s,%s,%s,%s)',
@@ -101,6 +111,10 @@ def end_booking(cur, key, action, actor):
     expected, target = ('in_use', 'released') if action == 'release' else ('booked', 'cancelled')
     if booking['status'] != expected:
         raise HTTPException(409, '该预留当前状态不允许此操作')
+    if action == 'release':
+        cur.execute("SELECT 1 FROM lane_switches WHERE booking_id=%s AND status='pending' LIMIT 1", (key,))
+        if cur.fetchone():
+            raise HTTPException(409, '换线确认转完前不能释放原预留')
     cur.execute('UPDATE lane_bookings SET status=%s WHERE id=%s', (target, key))
     audit(cur, actor, f'lane.{target}', key)
     return {'id': key, 'status': target}

@@ -46,5 +46,10 @@ class BookingEnd(BaseModel):
     action: Literal['release', 'cancel']
 
 
+class LaneSwitchInput(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    to_lane_id: int = Field(gt=0)
+
+
 class HandoffInput(Note, FloorHourInput):
     pass

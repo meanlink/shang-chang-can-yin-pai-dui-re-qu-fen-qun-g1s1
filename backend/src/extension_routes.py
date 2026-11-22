@@ -2,9 +2,9 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from . import coverage, handoffs, lanes
+from . import coverage, handoffs, lane_switch, lanes
 from .contracts import FloorHourInput, Role
-from .extension_contracts import BookingEnd, BookingInput, CoverageOrderInput, HandoffInput, LaneInput, LoadInput, Note
+from .extension_contracts import BookingEnd, BookingInput, CoverageOrderInput, HandoffInput, LaneInput, LaneSwitchInput, LoadInput, Note
 from .security import authenticate, permit
 from .shift import lock_hour
 from .storage import transaction
@@ -72,6 +72,24 @@ def end_lane(key: int, data: BookingEnd, user=Depends(authenticate)):
         raise HTTPException(403, '当前岗位无权执行此操作')
     with transaction() as cur:
         return lanes.end_booking(cur, key, data.action, user['id'])
+
+
+@router.get('/lane-switches')
+def get_switches(floor: Floor, _user=Depends(authenticate)):
+    with transaction() as cur:
+        return lane_switch.list_switches(cur, floor)
+
+
+@router.post('/lane-bookings/{key}/switch', status_code=201)
+def switch_lane(key: int, data: LaneSwitchInput, user=Depends(operator)):
+    with transaction() as cur:
+        return lane_switch.initiate(cur, key, data.to_lane_id, user['id'])
+
+
+@router.post('/lane-switches/{key}/confirm')
+def confirm_switch(key: int, user=Depends(steward)):
+    with transaction() as cur:
+        return lane_switch.confirm(cur, key, user['id'])
 
 
 @router.get('/handoffs')

@@ -1,0 +1,27 @@
+CREATE TABLE IF NOT EXISTS lane_switches (
+    id INT PRIMARY KEY AUTO_INCREMENT,
+    booking_id INT NOT NULL,
+    task_id INT NOT NULL,
+    from_lane_id INT NOT NULL,
+    to_lane_id INT NOT NULL,
+    slot_start DATETIME NOT NULL,
+    seats SMALLINT NOT NULL CHECK (seats BETWEEN 1 AND 150),
+    status ENUM('pending','confirmed') NOT NULL DEFAULT 'pending',
+    pending_booking_id INT GENERATED ALWAYS AS (CASE WHEN status = 'pending' THEN booking_id ELSE NULL END) STORED UNIQUE,
+    requested_by INT NOT NULL,
+    confirmed_by INT,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    confirmed_at TIMESTAMP NULL,
+    KEY switch_by_target_slot (to_lane_id,slot_start,status),
+    KEY switch_by_task (task_id),
+    CHECK (from_lane_id <> to_lane_id),
+    CHECK (MINUTE(slot_start) IN (0,15,30,45) AND SECOND(slot_start) = 0),
+    CHECK ((status = 'pending' AND confirmed_by IS NULL AND confirmed_at IS NULL) OR
+           (status = 'confirmed' AND confirmed_by IS NOT NULL AND confirmed_at IS NOT NULL)),
+    FOREIGN KEY (booking_id) REFERENCES lane_bookings(id),
+    FOREIGN KEY (task_id) REFERENCES dispatch_tasks(id),
+    FOREIGN KEY (from_lane_id) REFERENCES queue_lanes(id),
+    FOREIGN KEY (to_lane_id) REFERENCES queue_lanes(id),
+    FOREIGN KEY (requested_by) REFERENCES users(id),
+    FOREIGN KEY (confirmed_by) REFERENCES users(id)
+) ENGINE=InnoDB;
